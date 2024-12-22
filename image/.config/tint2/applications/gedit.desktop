@@ -1,8 +1,9 @@
 [Desktop Entry]
-Name=Gedit
-Comment=Open gedit
-Exec=gedit
-Icon=text-editor-symbolic
-Terminal=false
+Version=1.0
 Type=Application
-Categories=TextEditor;
+Name=gedit
+Comment=Edit text files
+Exec=/usr/bin/gedit %F
+Icon=gedit
+Terminal=false
+StartupWMClass=gedit
