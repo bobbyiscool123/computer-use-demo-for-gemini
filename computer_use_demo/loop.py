@@ -1,54 +1,33 @@
 """
-Agentic sampling loop that calls the Anthropic API and local implementation of anthropic-defined computer use tools.
+Agentic sampling loop that calls the Gemini API and local implementation of computer use tools.
 """
 
 import platform
 from collections.abc import Callable
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, cast
-
+from typing import Any, cast, List
+import google.generativeai as genai
 import httpx
-from anthropic import (
-    Anthropic,
-    AnthropicBedrock,
-    AnthropicVertex,
-    APIError,
-    APIResponseValidationError,
-    APIStatusError,
-)
-from anthropic.types.beta import (
-    BetaCacheControlEphemeralParam,
-    BetaContentBlockParam,
-    BetaImageBlockParam,
-    BetaMessage,
-    BetaMessageParam,
-    BetaTextBlock,
-    BetaTextBlockParam,
-    BetaToolResultBlockParam,
-    BetaToolUseBlockParam,
-)
-
+from google.generativeai.types import  Content, Part, ToolCall, FunctionDeclaration
+from google.api_core import exceptions
 from .tools import BashTool, ComputerTool, EditTool, ToolCollection, ToolResult
+
 
 COMPUTER_USE_BETA_FLAG = "computer-use-2024-10-22"
 PROMPT_CACHING_BETA_FLAG = "prompt-caching-2024-07-31"
 
 
 class APIProvider(StrEnum):
-    ANTHROPIC = "anthropic"
-    BEDROCK = "bedrock"
-    VERTEX = "vertex"
+    GEMINI = "gemini"
 
 
 PROVIDER_TO_DEFAULT_MODEL_NAME: dict[APIProvider, str] = {
-    APIProvider.ANTHROPIC: "claude-3-5-sonnet-20241022",
-    APIProvider.BEDROCK: "anthropic.claude-3-5-sonnet-20241022-v2:0",
-    APIProvider.VERTEX: "claude-3-5-sonnet-v2@20241022",
+    APIProvider.GEMINI: "gemini-1.5-pro-latest",
 }
 
 
-# This system prompt is optimized for the Docker environment in this repository and
+# This system prompt is optimized for the environment in this repository and
 # specific tool combinations enabled.
 # We encourage modifying this system prompt to ensure the model has context for the
 # environment it is running in, and to provide any additional information that may be
@@ -75,8 +54,8 @@ async def sampling_loop(
     model: str,
     provider: APIProvider,
     system_prompt_suffix: str,
-    messages: list[BetaMessageParam],
-    output_callback: Callable[[BetaContentBlockParam], None],
+    messages: list[dict],
+    output_callback: Callable[[dict], None],
     tool_output_callback: Callable[[ToolResult, str], None],
     api_response_callback: Callable[
         [httpx.Request, httpx.Response | object | None, Exception | None], None
@@ -86,211 +65,128 @@ async def sampling_loop(
     max_tokens: int = 4096,
 ):
     """
-    Agentic sampling loop for the assistant/tool interaction of computer use.
+    Agentic sampling loop for the assistant/tool interaction of computer use with Gemini API.
     """
     tool_collection = ToolCollection(
         ComputerTool(),
         BashTool(),
         EditTool(),
     )
-    system = BetaTextBlockParam(
-        type="text",
-        text=f"{SYSTEM_PROMPT}{' ' + system_prompt_suffix if system_prompt_suffix else ''}",
-    )
-
+    system_prompt = f"{SYSTEM_PROMPT}{' ' + system_prompt_suffix if system_prompt_suffix else ''}"
+    genai.configure(api_key=api_key)
+    gemini_model = genai.GenerativeModel(model)
+    
+    chat = gemini_model.start_chat(history=[])
+    
+    def _convert_to_gemini_content(messages: list[dict]) -> list[Content]:
+        gemini_contents = []
+        for message in messages:
+            parts: List[Part] = []
+            if isinstance(message['content'], str):
+                 parts.append(Part.from_text(message['content']))
+            elif isinstance(message['content'], list):
+                 for block in message['content']:
+                    if isinstance(block, dict):
+                         if block.get('type') == 'text':
+                            parts.append(Part.from_text(block['text']))
+                         if block.get('type') == 'image':
+                              try:
+                                  parts.append(Part.from_image(data=base64.b64decode(block['source']['data']), mime_type='image/png'))
+                              except Exception as e:
+                                  print(e)
+                                  pass
+                    else:
+                         parts.append(Part.from_text(str(block)))
+            gemini_contents.append(Content(parts=parts, role=message['role']))
+        return gemini_contents
+    
+    
     while True:
-        enable_prompt_caching = False
-        betas = [COMPUTER_USE_BETA_FLAG]
-        image_truncation_threshold = only_n_most_recent_images or 0
-        if provider == APIProvider.ANTHROPIC:
-            client = Anthropic(api_key=api_key, max_retries=4)
-            enable_prompt_caching = True
-        elif provider == APIProvider.VERTEX:
-            client = AnthropicVertex()
-        elif provider == APIProvider.BEDROCK:
-            client = AnthropicBedrock()
-
-        if enable_prompt_caching:
-            betas.append(PROMPT_CACHING_BETA_FLAG)
-            _inject_prompt_caching(messages)
-            # Because cached reads are 10% of the price, we don't think it's
-            # ever sensible to break the cache by truncating images
-            only_n_most_recent_images = 0
-            system["cache_control"] = {"type": "ephemeral"}
-
-        if only_n_most_recent_images:
-            _maybe_filter_to_n_most_recent_images(
-                messages,
-                only_n_most_recent_images,
-                min_removal_threshold=image_truncation_threshold,
-            )
-
-        # Call the API
-        # we use raw_response to provide debug information to streamlit. Your
-        # implementation may be able call the SDK directly with:
-        # `response = client.messages.create(...)` instead.
+        gemini_messages = _convert_to_gemini_content(messages)
+        chat.history = gemini_messages
+        
+        tools = tool_collection.to_params()
+        function_declarations = [FunctionDeclaration(**tool) for tool in tools]
+        
         try:
-            raw_response = client.beta.messages.with_raw_response.create(
-                max_tokens=max_tokens,
-                messages=messages,
-                model=model,
-                system=[system],
-                tools=tool_collection.to_params(),
-                betas=betas,
+            response = chat.send_message(
+                system_prompt,
+                tools=function_declarations,
             )
-        except (APIStatusError, APIResponseValidationError) as e:
-            api_response_callback(e.request, e.response, e)
-            return messages
-        except APIError as e:
-            api_response_callback(e.request, e.body, e)
-            return messages
 
-        api_response_callback(
-            raw_response.http_response.request, raw_response.http_response, None
-        )
-
-        response = raw_response.parse()
-
-        response_params = _response_to_params(response)
-        messages.append(
-            {
-                "role": "assistant",
-                "content": response_params,
-            }
-        )
-
-        tool_result_content: list[BetaToolResultBlockParam] = []
-        for content_block in response_params:
-            output_callback(content_block)
-            if content_block["type"] == "tool_use":
-                result = await tool_collection.run(
-                    name=content_block["name"],
-                    tool_input=cast(dict[str, Any], content_block["input"]),
-                )
-                tool_result_content.append(
-                    _make_api_tool_result(result, content_block["id"])
-                )
-                tool_output_callback(result, content_block["id"])
-
-        if not tool_result_content:
-            return messages
-
-        messages.append({"content": tool_result_content, "role": "user"})
-
-
-def _maybe_filter_to_n_most_recent_images(
-    messages: list[BetaMessageParam],
-    images_to_keep: int,
-    min_removal_threshold: int,
-):
-    """
-    With the assumption that images are screenshots that are of diminishing value as
-    the conversation progresses, remove all but the final `images_to_keep` tool_result
-    images in place, with a chunk of min_removal_threshold to reduce the amount we
-    break the implicit prompt cache.
-    """
-    if images_to_keep is None:
-        return messages
-
-    tool_result_blocks = cast(
-        list[BetaToolResultBlockParam],
-        [
-            item
-            for message in messages
-            for item in (
-                message["content"] if isinstance(message["content"], list) else []
+            api_response_callback(
+                response.raw_response.request, response.raw_response.response, None
             )
-            if isinstance(item, dict) and item.get("type") == "tool_result"
-        ],
-    )
+            
+        except exceptions.GoogleAPIError as e:
+             api_response_callback(e.request, e.response, e)
+             return messages
+         
+        
+        if response.candidates[0].content.parts and  len(response.candidates[0].content.parts) > 0:
+            response_params = []
+            for part in response.candidates[0].content.parts:
+                 if isinstance(part, str):
+                      response_params.append({"type":"text", "text": part})
+                 elif isinstance(part, ToolCall):
+                       response_params.append(part.function_call)
+            
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": response_params,
+                }
+            )
+        
+            tool_result_content = []
+            for content_block in response_params:
+                 if content_block.get('name'):
+                    output_callback(content_block)
+                    result = await tool_collection.run(
+                         name=content_block["name"],
+                         tool_input=cast(dict[str, Any], content_block["arguments"]),
+                    )
+                    tool_result_content.append(
+                         _make_api_tool_result(result, content_block.get('name'))
+                    )
+                    tool_output_callback(result, content_block.get('name'))
 
-    total_images = sum(
-        1
-        for tool_result in tool_result_blocks
-        for content in tool_result.get("content", [])
-        if isinstance(content, dict) and content.get("type") == "image"
-    )
+            if not tool_result_content:
+                return messages
 
-    images_to_remove = total_images - images_to_keep
-    # for better cache behavior, we want to remove in chunks
-    images_to_remove -= images_to_remove % min_removal_threshold
-
-    for tool_result in tool_result_blocks:
-        if isinstance(tool_result.get("content"), list):
-            new_content = []
-            for content in tool_result.get("content", []):
-                if isinstance(content, dict) and content.get("type") == "image":
-                    if images_to_remove > 0:
-                        images_to_remove -= 1
-                        continue
-                new_content.append(content)
-            tool_result["content"] = new_content
-
-
-def _response_to_params(
-    response: BetaMessage,
-) -> list[BetaTextBlockParam | BetaToolUseBlockParam]:
-    res: list[BetaTextBlockParam | BetaToolUseBlockParam] = []
-    for block in response.content:
-        if isinstance(block, BetaTextBlock):
-            res.append({"type": "text", "text": block.text})
+            messages.append({"content": tool_result_content, "role": "user"})
         else:
-            res.append(cast(BetaToolUseBlockParam, block.model_dump()))
-    return res
-
-
-def _inject_prompt_caching(
-    messages: list[BetaMessageParam],
-):
-    """
-    Set cache breakpoints for the 3 most recent turns
-    one cache breakpoint is left for tools/system prompt, to be shared across sessions
-    """
-
-    breakpoints_remaining = 3
-    for message in reversed(messages):
-        if message["role"] == "user" and isinstance(
-            content := message["content"], list
-        ):
-            if breakpoints_remaining:
-                breakpoints_remaining -= 1
-                content[-1]["cache_control"] = BetaCacheControlEphemeralParam(
-                    {"type": "ephemeral"}
-                )
-            else:
-                content[-1].pop("cache_control", None)
-                # we'll only every have one extra turn per loop
-                break
+            return messages
 
 
 def _make_api_tool_result(
     result: ToolResult, tool_use_id: str
-) -> BetaToolResultBlockParam:
+) -> dict:
     """Convert an agent ToolResult to an API ToolResultBlockParam."""
-    tool_result_content: list[BetaTextBlockParam | BetaImageBlockParam] | str = []
+    tool_result_content: list[dict] | str = []
     is_error = False
     if result.error:
         is_error = True
         tool_result_content = _maybe_prepend_system_tool_result(result, result.error)
     else:
         if result.output:
-            tool_result_content.append(
-                {
-                    "type": "text",
-                    "text": _maybe_prepend_system_tool_result(result, result.output),
-                }
-            )
+             tool_result_content.append(
+                 {
+                     "type": "text",
+                     "text": _maybe_prepend_system_tool_result(result, result.output),
+                 }
+             )
         if result.base64_image:
-            tool_result_content.append(
+             tool_result_content.append(
                 {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": result.base64_image,
-                    },
+                     "type": "image",
+                     "source": {
+                         "type": "base64",
+                         "media_type": "image/png",
+                         "data": result.base64_image,
+                     },
                 }
-            )
+             )
     return {
         "type": "tool_result",
         "content": tool_result_content,
