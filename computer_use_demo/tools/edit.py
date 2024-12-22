@@ -2,8 +2,6 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Literal, get_args
 
-from anthropic.types.beta import BetaToolTextEditor20241022Param
-
 from .base import BaseAnthropicTool, CLIResult, ToolError, ToolResult
 from .run import maybe_truncate, run
 
@@ -23,7 +21,6 @@ class EditTool(BaseAnthropicTool):
     The tool parameters are defined by Anthropic and are not editable.
     """
 
-    api_type: Literal["text_editor_20241022"] = "text_editor_20241022"
     name: Literal["str_replace_editor"] = "str_replace_editor"
 
     _file_history: dict[Path, list[str]]
@@ -32,10 +29,54 @@ class EditTool(BaseAnthropicTool):
         self._file_history = defaultdict(list)
         super().__init__()
 
-    def to_params(self) -> BetaToolTextEditor20241022Param:
+    def to_params(self) -> dict:
         return {
             "name": self.name,
-            "type": self.api_type,
+            "description": "Use this to view, create, and edit files.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                     "command": {
+                         "type": "string",
+                         "description": "The command to perform with the editor",
+                         "enum":[
+                             "view",
+                             "create",
+                             "str_replace",
+                             "insert",
+                             "undo_edit"
+                          ]
+                     },
+                     "path":{
+                         "type":"string",
+                         "description":"The absolute file path on the system"
+                     },
+                     "file_text":{
+                         "type":"string",
+                         "description":"The file content for creating files"
+                     },
+                      "view_range": {
+                          "type": "array",
+                           "items":{
+                               "type":"integer"
+                           },
+                            "description":"The range of lines to view for the file"
+                      },
+                      "old_str":{
+                          "type":"string",
+                          "description":"The old string to be replaced in the file"
+                      },
+                      "new_str":{
+                          "type":"string",
+                          "description":"The new string to replace the old string"
+                      },
+                      "insert_line":{
+                           "type":"integer",
+                           "description":"The line number where the new string will be inserted"
+                      }
+                },
+                "required": ["command", "path"]
+           }
         }
 
     async def __call__(

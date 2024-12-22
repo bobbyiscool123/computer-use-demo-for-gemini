@@ -39,4 +39,3 @@ async def run(
             pass
         raise TimeoutError(
             f"Command '{cmd}' timed out after {timeout} seconds"
-        ) from exc

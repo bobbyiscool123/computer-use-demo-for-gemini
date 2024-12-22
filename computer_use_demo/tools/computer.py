@@ -8,8 +8,6 @@ from pathlib import Path
 from typing import Literal, TypedDict
 from uuid import uuid4
 
-from anthropic.types.beta import BetaToolComputerUse20241022Param
-
 from .base import BaseAnthropicTool, ToolError, ToolResult
 from .run import run
 
@@ -68,7 +66,6 @@ class ComputerTool(BaseAnthropicTool):
     """
 
     name: Literal["computer"] = "computer"
-    api_type: Literal["computer_20241022"] = "computer_20241022"
     width: int
     height: int
     display_num: int | None
@@ -87,8 +84,45 @@ class ComputerTool(BaseAnthropicTool):
             "display_number": self.display_num,
         }
 
-    def to_params(self) -> BetaToolComputerUse20241022Param:
-        return {"name": self.name, "type": self.api_type, **self.options}
+    def to_params(self) -> dict:
+        return {
+            "name": self.name,
+            "description": "Use this to interact with the screen, keyboard, and mouse of the current computer.",
+             "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                         "type": "string",
+                         "description": "The action to perform on the computer",
+                         "enum":  [
+                            "key",
+                            "type",
+                            "mouse_move",
+                            "left_click",
+                            "left_click_drag",
+                            "right_click",
+                            "middle_click",
+                            "double_click",
+                            "screenshot",
+                            "cursor_position",
+                        ]
+                    },
+                    "text":{
+                        "type": "string",
+                        "description":"The text to input"
+                    },
+                    "coordinate":{
+                        "type": "array",
+                        "items": {
+                            "type":"integer"
+                         },
+                        "description": "The coordinates on the screen"
+                    }
+                 },
+                "required": ["action"]
+             } ,
+            **self.options
+         }
 
     def __init__(self):
         super().__init__()
