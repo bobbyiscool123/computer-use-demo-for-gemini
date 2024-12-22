@@ -1,8 +1,9 @@
 [Desktop Entry]
-Name=Firefox Custom
-Comment=Open Firefox with custom URL
-Exec=firefox-esr -new-window
+Version=1.0
+Type=Application
+Name=Firefox
+Comment=Browse the World Wide Web
+Exec=/usr/bin/firefox-esr %u
 Icon=firefox-esr
 Terminal=false
-Type=Application
-Categories=Network;WebBrowser;
+StartupWMClass=firefox-esr
