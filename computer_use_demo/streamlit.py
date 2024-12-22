@@ -16,12 +16,8 @@ from typing import cast
 
 import httpx
 import streamlit as st
-from anthropic import RateLimitError
-from anthropic.types.beta import (
-    BetaContentBlockParam,
-    BetaTextBlockParam,
-    BetaToolResultBlockParam,
-)
+from google.api_core import exceptions
+from google.generativeai.types import  ToolCall, Part
 from streamlit.delta_generator import DeltaGenerator
 
 from computer_use_demo.loop import (
@@ -68,11 +64,11 @@ def setup_state():
     if "api_key" not in st.session_state:
         # Try to load API key from file first, then environment
         st.session_state.api_key = load_from_storage("api_key") or os.getenv(
-            "ANTHROPIC_API_KEY", ""
+            "GEMINI_API_KEY", ""
         )
     if "provider" not in st.session_state:
         st.session_state.provider = (
-            os.getenv("API_PROVIDER", "anthropic") or APIProvider.ANTHROPIC
+            os.getenv("API_PROVIDER", "gemini") or APIProvider.GEMINI
         )
     if "provider_radio" not in st.session_state:
         st.session_state.provider_radio = st.session_state.provider
@@ -106,7 +102,7 @@ async def main():
 
     st.markdown(STREAMLIT_STYLE, unsafe_allow_html=True)
 
-    st.title("Claude Computer Use Demo")
+    st.title("Gemini Computer Use Demo")
 
     if not os.getenv("HIDE_WARNING", False):
         st.warning(WARNING_TEXT)
@@ -130,9 +126,9 @@ async def main():
 
         st.text_input("Model", key="model")
 
-        if st.session_state.provider == APIProvider.ANTHROPIC:
+        if st.session_state.provider == APIProvider.GEMINI:
             st.text_input(
-                "Anthropic API Key",
+                "Gemini API Key",
                 type="password",
                 key="api_key",
                 on_change=lambda: save_to_storage("api_key", st.session_state.api_key),
@@ -174,7 +170,7 @@ async def main():
 
     chat, http_logs = st.tabs(["Chat", "HTTP Exchange Logs"])
     new_message = st.chat_input(
-        "Type a message to send to Claude to control the computer..."
+        "Type a message to send to Gemini to control the computer..."
     )
 
     with chat:
@@ -193,7 +189,7 @@ async def main():
                     else:
                         _render_message(
                             message["role"],
-                            cast(BetaContentBlockParam | ToolResult, block),
+                            cast(dict | ToolResult, block),
                         )
 
         # render past http exchanges
@@ -207,7 +203,7 @@ async def main():
                     "role": Sender.USER,
                     "content": [
                         *maybe_add_interruption_blocks(),
-                        BetaTextBlockParam(type="text", text=new_message),
+                         {"type":"text", "text":new_message},
                     ],
                 }
             )
@@ -251,19 +247,19 @@ def maybe_add_interruption_blocks():
     result = []
     last_message = st.session_state.messages[-1]
     previous_tool_use_ids = [
-        block["id"] for block in last_message["content"] if block["type"] == "tool_use"
+        block["name"] for block in last_message["content"] if block.get("name") and not block.get("type")
     ]
     for tool_use_id in previous_tool_use_ids:
         st.session_state.tools[tool_use_id] = ToolResult(error=INTERRUPT_TOOL_ERROR)
         result.append(
-            BetaToolResultBlockParam(
-                tool_use_id=tool_use_id,
-                type="tool_result",
-                content=INTERRUPT_TOOL_ERROR,
-                is_error=True,
-            )
+            {
+                "tool_use_id": tool_use_id,
+                "type": "tool_result",
+                "content": INTERRUPT_TOOL_ERROR,
+                "is_error": True,
+            }
         )
-    result.append(BetaTextBlockParam(type="text", text=INTERRUPT_TEXT))
+    result.append({"type":"text", "text":INTERRUPT_TEXT})
     return result
 
 
@@ -275,26 +271,17 @@ def track_sampling_loop():
 
 
 def validate_auth(provider: APIProvider, api_key: str | None):
-    if provider == APIProvider.ANTHROPIC:
+    if provider == APIProvider.GEMINI:
         if not api_key:
-            return "Enter your Anthropic API key in the sidebar to continue."
-    if provider == APIProvider.BEDROCK:
-        import boto3
-
-        if not boto3.Session().get_credentials():
-            return "You must have AWS credentials set up to use the Bedrock API."
-    if provider == APIProvider.VERTEX:
-        import google.auth
-        from google.auth.exceptions import DefaultCredentialsError
-
-        if not os.environ.get("CLOUD_ML_REGION"):
-            return "Set the CLOUD_ML_REGION environment variable to use the Vertex API."
+            return "Enter your Gemini API key in the sidebar to continue."
         try:
-            google.auth.default(
-                scopes=["https://www.googleapis.com/auth/cloud-platform"],
-            )
-        except DefaultCredentialsError:
-            return "Your google cloud credentials are not set up correctly."
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('gemini-pro')
+            response = model.generate_content("test")
+            response.resolve()
+        except exceptions.GoogleAPIError as e:
+            return f"There was an issue validating with the API Key you have provided:\n\n{e}"
 
 
 def load_from_storage(filename: str) -> str | None:
@@ -372,11 +359,8 @@ def _render_api_response(
 
 
 def _render_error(error: Exception):
-    if isinstance(error, RateLimitError):
-        body = "You have been rate limited."
-        if retry_after := error.response.headers.get("retry-after"):
-            body += f" **Retry after {str(timedelta(seconds=int(retry_after)))} (HH:MM:SS).** See our API [documentation](https://docs.anthropic.com/en/api/rate-limits) for more details."
-        body += f"\n\n{error.message}"
+    if isinstance(error, exceptions.GoogleAPIError):
+        body = f"**{error.reason}**\n\n{error.message}"
     else:
         body = str(error)
         body += "\n\n**Traceback:**"
@@ -388,7 +372,7 @@ def _render_error(error: Exception):
 
 def _render_message(
     sender: Sender,
-    message: str | BetaContentBlockParam | ToolResult,
+    message: str | dict | ToolResult,
 ):
     """Convert input from the user or output from the agent to a streamlit message."""
     # streamlit's hotreloading breaks isinstance checks, so we need to check for class names
@@ -413,13 +397,13 @@ def _render_message(
             if message.base64_image and not st.session_state.hide_images:
                 st.image(base64.b64decode(message.base64_image))
         elif isinstance(message, dict):
-            if message["type"] == "text":
-                st.write(message["text"])
-            elif message["type"] == "tool_use":
-                st.code(f'Tool Use: {message["name"]}\nInput: {message["input"]}')
+            if message.get("type") == "text":
+                 st.write(message["text"])
+            elif message.get("name"):
+                st.code(f'Tool Use: {message["name"]}\nInput: {message["arguments"]}')
             else:
-                # only expected return types are text and tool_use
-                raise Exception(f'Unexpected response type {message["type"]}')
+                 # only expected return types are text and tool_use
+                raise Exception(f'Unexpected response type {message.get("type")}')
         else:
             st.markdown(message)
 
