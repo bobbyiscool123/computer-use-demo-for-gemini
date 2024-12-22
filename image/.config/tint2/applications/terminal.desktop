@@ -1,8 +1,9 @@
 [Desktop Entry]
+Version=1.0
+Type=Application
 Name=Terminal
-Comment=Open Terminal
-Exec=xterm
+Comment=Use the command line
+Exec=/usr/bin/xterm
 Icon=utilities-terminal
 Terminal=false
-Type=Application
-Categories=System;TerminalEmulator;
+StartupWMClass=xterm
