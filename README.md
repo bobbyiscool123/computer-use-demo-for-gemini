@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://storage.googleapis.com/generativeai-downloads/gemini_logo.png" alt="Gemini Logo" width="150"/>
+  <img src="https://i.pinimg.com/736x/d8/91/d5/d891d55b8800b2e53129f4c79c9b39f0.jpg" width="500"/>
   <h1>Gemini Computer Use Demo</h1>
 </div>
 
